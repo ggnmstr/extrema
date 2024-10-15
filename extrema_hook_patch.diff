@@ -1,0 +1,46 @@
+diff --git a/src/backend/postmaster/bgworker.c b/src/backend/postmaster/bgworker.c
+index b37ccb85ad..69e97c2111 100644
+--- a/src/backend/postmaster/bgworker.c
++++ b/src/backend/postmaster/bgworker.c
+@@ -34,6 +34,9 @@
+ #include "utils/ps_status.h"
+ #include "utils/timeout.h"
+ 
++/* hook added by extrema extension */
++BgwBeforeUserCode_hook_type BgwBeforeUserCode_hook = NULL;
++
+ /*
+  * The postmaster's list of registered background workers, in private memory.
+  */
+@@ -835,6 +838,13 @@ BackgroundWorkerMain(char *startup_data, size_t startup_data_len)
+ 	entrypt = LookupBackgroundWorkerFunction(worker->bgw_library_name,
+ 											 worker->bgw_function_name);
+ 
++	/*
++	 * Invoke hook before user-defined code if exists
++	 */
++	if (BgwBeforeUserCode_hook){
++		BgwBeforeUserCode_hook(MyBgworkerEntry);
++	}
++
+ 	/*
+ 	 * Note that in normal processes, we would call InitPostgres here.  For a
+ 	 * worker, however, we don't know what database to connect to, yet; so we
+diff --git a/src/include/postmaster/bgworker_internals.h b/src/include/postmaster/bgworker_internals.h
+index 9106a0ef3f..6e60da9bb5 100644
+--- a/src/include/postmaster/bgworker_internals.h
++++ b/src/include/postmaster/bgworker_internals.h
+@@ -16,6 +16,13 @@
+ #include "lib/ilist.h"
+ #include "postmaster/bgworker.h"
+ 
++/*
++ * Hook called just before execution of user defined fucntion.
++ * All standard postmaster initialization is done till this moment.
++ */
++typedef void (*BgwBeforeUserCode_hook_type) (BackgroundWorker *ThisBgworkerEntry);
++extern PGDLLIMPORT BgwBeforeUserCode_hook_type BgwBeforeUserCode_hook;
++
+ /* GUC options */
+ 
+ /*
