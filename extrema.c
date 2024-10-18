@@ -33,6 +33,8 @@ PG_MODULE_MAGIC;
 #define CONTROLLER_VALUE_LEN 1024
 
 
+#define RAM_CONTROLLER "memory.max"
+#define CPU_CONTROLLER "cpu.weight"
 
 typedef struct reg_entry {
 	char libname[LIBNAME_LEN];
@@ -255,6 +257,7 @@ set_lib_controller_value(const char *libname, const char *controller, const char
 		elog(LOG,"set_lib_controller open lib %s controller %s error: %s",libname,controller,strerror(e));
 		return -1;
 	}
+	elog(LOG,"set_lib_controller setting %s %s to %s" ,libname,controller,value);
 	if (write(fd,value,vlen) < 0)
 	{
 		int e = errno;
@@ -284,9 +287,6 @@ lib_create_cgroup(const char *libname, reg_entry *entry)
 	sprintf(cgroup_path, "%s/%s",pm_cg_fp, libname);
 
 
-	// FIXME;
-	// perhaps, we should firstly check that these directories exist
-	// before we mkdir them?
 	if (pg_mkdir_p(cgroup_path, pg_dir_create_mode) < 0){
 		elog(LOG, "ERROR CREATING CGROUP FOR %s",libname);
 		return -1;
@@ -350,7 +350,7 @@ static int lib_set_cpu(const char *libname, int weight)
 
 	elog(LOG, "lib_set_cpu: setting %s to %lu",libname,weight);
 	printed = sprintf(sval,"%d",weight);
-	if (set_lib_controller_value(libname,"cpu.weight",sval,printed) != 0){
+	if (set_lib_controller_value(libname,CPU_CONTROLLER,sval,printed) != 0){
 		return -1;
 	}
 	entry = find_entry(libname);
@@ -384,7 +384,7 @@ lib_set_mem(const char *libname, size_t val)
 
 	elog(LOG, "lib_set_mem: setting %s to %lu",libname,val);
 	printed = sprintf(sval,"%d",val);
-	if (set_lib_controller_value(libname,"memory.max",sval,printed) != 0){
+	if (set_lib_controller_value(libname,RAM_CONTROLLER,sval,printed) != 0){
 		return -1;
 	}
 	entry = find_entry(libname);

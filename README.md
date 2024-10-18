@@ -24,6 +24,8 @@ user@pc /postgres/contrib/extrema> git reset --hard 42ce8ba18502d107879776acb32c
 user@pc /postgres/contrib/extrema> git apply extrema_hook_patch.diff
 ```
 
+Don't forget to configure, make and install PostgreSQL after you apply the patch to source code.
+
 
 2. Install extension: 
 ``` shell 
