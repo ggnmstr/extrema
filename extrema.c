@@ -899,11 +899,6 @@ ema_object_access_str(ObjectAccessType access,
 
 
 
-		if (kill(PostmasterPid, SIGHUP) != 0) {
-			elog(LOG, "ERROR SENDING SIGHUP TO POSTMASTER");
-		}
-
-
 		if (pid > 0) {
 			if (kill(pid, SIGUSR1) != 0) {
 				elog(LOG, "ERROR SENDING SIHUP TO %lu", pid);
