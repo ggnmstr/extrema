@@ -1,24 +1,36 @@
 #include "postgres.h"
+
 #include "c.h"
+#include "catalog/objectaccess.h"
 #include "common/file_perm.h"
+#include "fmgr.h"
+#include "funcapi.h"
 #include "lib/ilist.h"
+#include "storage/latch.h"
+#include "storage/lwlock.h"
+#include "miscadmin.h"
 #include "nodes/pg_list.h"
 #include "port.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/interrupt.h"
+#include "storage/ipc.h"
+#include "storage/procsignal.h"
+#include "storage/shmem.h"
 #include "utils/builtins.h"
-#include "fmgr.h"
 #include "utils/elog.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/palloc.h"
 #include "utils/varlena.h"
-#include <errno.h>
+#include "c.h"
+#include "utils/wait_event.h"
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
-#include "funcapi.h"
 #include <unistd.h>
+
 PG_MODULE_MAGIC;
 
 
@@ -39,8 +51,12 @@ PG_MODULE_MAGIC;
 typedef struct reg_entry {
 	char libname[LIBNAME_LEN];
 	int cpu_usage;
-	size_t ram_usage;
+	int ram_usage;
 } reg_entry;
+
+/* static void guc_assign_hook(int newval, void *extra); */
+static bool guc_check_hook(int *newval, void **extra,GucSource source);
+static bool mem_check_hook(int *newval, void **extra,GucSource source);
 
 
 static int set_lib_controller_value(const char *libname, const char *controller, const char *value, size_t vlen);
@@ -52,8 +68,27 @@ static int lib_set_mem(const char *libname, size_t val);
 static int lib_set_cpu(const char *libname, int weight);
 static reg_entry *find_entry(const char *libname);
 static int get_pm_cg();
+static void handle_signal(SIGNAL_ARGS);
+static void ema_start_worker(void);
+static void ema_shmem_request(void);
+static void ema_shmem_startup(void);
+
+static void
+ema_object_access_str(ObjectAccessType access,
+						Oid classId,
+						const char *objectStr,
+						int subId,
+						void *arg);
 
 
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+
+static object_access_hook_type_str prev_object_access_hook_str = NULL;
+
+PGDLLEXPORT void guc_checker_main(Datum main_arg);
+
+static pid_t *checker_pid = NULL;
 int pagesize;
 
 // TODO change to hashmap
@@ -106,8 +141,20 @@ _PG_init(void)
 	pagesize = getpagesize();
 
 
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = ema_shmem_startup;
+
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = ema_shmem_request;
+
 	old_bgworker_hook = BgwBeforeUserCode_hook;
 	BgwBeforeUserCode_hook = bgw_isolate;
+
+	prev_object_access_hook_str = object_access_hook_str;
+	object_access_hook_str = ema_object_access_str;
+
+
+
 
 	if (prepare_cgroup_subtree() != 0)
 	{
@@ -121,25 +168,58 @@ _PG_init(void)
 		elog(LOG,"LIBRARIES NOT FOUND :C");
 		return;
 	}
+
+
+	ema_start_worker();
+
 	elog(LOG,"LIBS FOUND: \'%s\'",res);
 	{
 		/*
 		 * For each library found in shared_preload_libraries
 		 * Create it's own cgroup and allocate entry in register (List)
 		 */
+		char varname[LIBNAME_LEN];
 		char *library_name = strtok(res,", ");
 		while (library_name != NULL)
 		{
 			elog(LOG,"LIBRARY NAME \'%s\'",library_name);
 
-			// XXX suspicious context switching.
-			// do we really need it?
+
+			// XXX context switching
 			oldctx = MemoryContextSwitchTo(TopMemoryContext);
 
 			cur_entry = palloc_object(reg_entry);
 			strcpy(cur_entry->libname,library_name);
 
 			library_list = lappend(library_list,cur_entry);
+
+			sprintf(varname,"ema.%s_mem",library_name);
+			DefineCustomIntVariable(varname,
+									"short description",
+									"long description",
+									&cur_entry->ram_usage,
+									4096,
+									4096,
+									4096*4096,
+									PGC_SIGHUP,
+									0,
+									mem_check_hook,
+									NULL,
+									NULL);
+
+			sprintf(varname,"ema.%s_cpu",library_name);
+			DefineCustomIntVariable(varname,
+									"short description",
+									"long description",
+									&cur_entry->cpu_usage,
+									0,
+									0,
+									10000,
+									PGC_SIGHUP,
+									0,
+									NULL,
+									NULL,
+									NULL);
 
 			if (lib_create_cgroup(library_name,cur_entry) != 0)
 			{
@@ -152,10 +232,34 @@ _PG_init(void)
 		}
 	}
 
+}
 
+/*
+ * Start extrema config check worker
+ */
+static void
+ema_start_worker(void)
+{
+	BackgroundWorker worker;
 
+	MemSet(&worker, 0, sizeof(BackgroundWorker));
+	worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
+	worker.bgw_start_time = BgWorkerStart_ConsistentState;
+	strcpy(worker.bgw_library_name, "extrema");
+	strcpy(worker.bgw_function_name, "guc_checker_main");
+	strcpy(worker.bgw_name, "extrema GUC checker");
+	strcpy(worker.bgw_type, "extrema GUC checker");
+
+	if (process_shared_preload_libraries_in_progress)
+	{
+		elog(LOG,"STARTED WORKER IN SHARED PRELOAD");
+		RegisterBackgroundWorker(&worker);
+		return;
+	}
+	elog(ERROR,"You should launch extrema in shared_preload_libraries");
 
 }
+
 
 /*
  * Reads full path to postgres.slice (created by user or systemd)
@@ -353,6 +457,7 @@ static int lib_set_cpu(const char *libname, int weight)
 	if (set_lib_controller_value(libname,CPU_CONTROLLER,sval,printed) != 0){
 		return -1;
 	}
+	return 0;
 	entry = find_entry(libname);
 	if (entry == NULL)
 	{
@@ -387,6 +492,7 @@ lib_set_mem(const char *libname, size_t val)
 	if (set_lib_controller_value(libname,RAM_CONTROLLER,sval,printed) != 0){
 		return -1;
 	}
+	return 0;
 	entry = find_entry(libname);
 	if (entry == NULL)
 	{
@@ -635,3 +741,231 @@ static int prepare_cgroup_subtree()
 	close(fd);
 	return 0;
 }
+
+
+void guc_checker_main(Datum main_arg)
+{
+	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
+	/* pqsignal(SIGHUP, handle_signal); */
+	pqsignal(SIGHUP, SignalHandlerForConfigReload);
+	/* pqsignal(SIGUSR1, procsignal_sigusr1_handler); */
+	pqsignal(SIGUSR1, handle_signal);
+	BackgroundWorkerUnblockSignals();
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+    *checker_pid = MyProcPid;
+    LWLockRelease(AddinShmemInitLock);
+
+
+
+	while(!ShutdownRequestPending)
+	{
+		// TODO code all the important work
+		// with cgroups right here.
+		ListCell *lc;
+		char option_name[4096];
+
+		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		foreach(lc, library_list)
+		{
+			reg_entry *entry = (reg_entry *) lfirst(lc);
+			const char *ln = entry->libname;
+			const char *option_value;
+			sprintf(option_name,"ema.%s_cpu" ,ln);
+			option_value = GetConfigOption(option_name, false, true);
+			elog(LOG, "%s : %s",option_name, option_value);
+			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->cpu_usage);
+
+
+			sprintf(option_name,"ema.%s_mem" ,ln);
+			option_value = GetConfigOption(option_name, false, true);
+			elog(LOG, "%s : %s",option_name, option_value);
+			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->ram_usage);
+
+
+
+		}
+		elog(LOG, "BGW I WAIT LATCH.");
+		MemoryContextSwitchTo(oldctx);
+		WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
+		ResetLatch(MyLatch);
+	}
+
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+    *checker_pid = 0;
+    LWLockRelease(AddinShmemInitLock);
+
+    /* proc_exit(0); */
+
+}
+
+int signals = 0;
+
+static void handle_signal(SIGNAL_ARGS)
+{
+	elog(LOG, "I GOT %d SIGNALS!",++signals);
+	SetLatch(MyLatch);
+}
+
+
+static void ema_shmem_request(void)
+{
+	elog(LOG,"IN SHMEM REQUEST HOOK");
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(sizeof(pid_t));
+	elog(LOG,"FINISH SHMEM REQUEST HOOK");
+	/* RequestAddinShmemSpace(MAXALIGN(sizeof(extensionSharedState))); */
+
+}
+
+static void ema_shmem_startup(void)
+{
+	bool found;
+
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+	elog(LOG,"IN SHMEM STARTUP HOOK");
+	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
+	checker_pid = (pid_t*)ShmemInitStruct("Checker PID", sizeof(pid_t),&found);
+
+	if (!found)
+	{
+		*checker_pid = 0;
+	}
+
+	LWLockRelease(AddinShmemInitLock);
+	elog(LOG,"FINISH SHMEM STARTUP HOOK");
+}
+
+
+
+static void
+ema_object_access_str(ObjectAccessType access,
+											 Oid classId,
+											 const char *objectStr,
+											 int subId,
+											 void *arg)
+{
+	pid_t pid;
+	if (prev_object_access_hook_str)
+		(*prev_object_access_hook_str) (access, classId, objectStr, subId, arg);
+
+	if (strncmp(objectStr,"ema.",4) != 0)
+	{
+		return;
+	}
+
+	if (access == OAT_POST_ALTER)
+	{
+		/* int a; */
+		/* char libname[LIBNAME_LEN]; */
+		/* char controller[CONTROLLER_VALUE_LEN]; */
+		/* char *p; */
+
+		if (process_shared_preload_libraries_in_progress)
+		{
+			elog(LOG,"OBJECT_ACCESS_HOOK: IN SHARED PRELOAD! :C");
+			return;
+		}
+
+		LWLockAcquire(AddinShmemInitLock, LW_WAIT_UNTIL_FREE);
+		pid = *checker_pid;
+		LWLockRelease(AddinShmemInitLock);
+
+		elog(LOG,"OBJECT_ACCESS_HOOK: got the pid %lu!",pid);
+
+
+
+		/// XXX
+		/* p = strstr(objectStr,"_"); */
+		/* if (p == NULL) */
+		/* { */
+		/* 	elog(LOG,"DID NOT FOUND :c"); */
+		/* } */
+
+		/* a = p - (objectStr+4); */
+
+		/* elog(LOG, "A = %d",a); */
+		/* strncpy(libname, objectStr+4,a); */
+		/* /// XXX there may be a bug with '\n' symbol in the end */
+		/* strncpy(controller,p+1,&objectStr[strlen(objectStr)] - p ); */
+		/* elog(LOG, "\'%s\' LIBNAME HERE",libname); */
+		/* elog(LOG, "\'%s\' CONTROLLER HERE",controller); */
+		/* elog(LOG, "\'%s\' VALUE HERE",arg); */
+		/// XXX
+
+
+
+		if (kill(PostmasterPid, SIGHUP) != 0) {
+			elog(LOG, "ERROR SENDING SIGHUP TO POSTMASTER");
+		}
+
+
+		if (pid > 0) {
+			if (kill(pid, SIGUSR1) != 0) {
+				elog(LOG, "ERROR SENDING SIHUP TO %lu", pid);
+			}
+		} else {
+			elog(LOG, "PID IS NOT SET :C", pid);
+		}
+
+	}
+}
+
+static bool guc_check_hook(int *newval, void **extra,GucSource source)
+{
+    pid_t pid;
+	elog(LOG,"GUC_CHECK_HOOK: START newval %d!",*newval);
+
+	if (process_shared_preload_libraries_in_progress)
+	{
+		elog(LOG,"GUC_CHECK_HOOK: IN PROGRESS OF SHARED_PRELOAD :C",pid);
+		return true;
+	}
+	return true;
+}
+
+
+static bool mem_check_hook(int *newval, void **extra,GucSource source)
+{
+	/*
+	 * memory.max in cgroup is floored to N*PAGESIZE of system.
+	 * So to keep the actual data in registry
+	 * we should also floor the number.
+	 */
+	*newval = (*newval / pagesize) * (pagesize);
+	return true;
+}
+/* static void guc_assign_hook(int newval, void *extra) */
+/* { */
+/*     pid_t pid; */
+/* 	elog(LOG,"GUC_ASSIGN_HOOK: START newval %d!",newval); */
+
+/* 	if (process_shared_preload_libraries_in_progress) */
+/* 	{ */
+/* 		elog(LOG,"GUC_ASSIGN_HOOK: IN PROGRESS OF SHARED_PRELOAD :C",pid); */
+/* 		return; */
+/* 	} */
+
+/*     LWLockAcquire(AddinShmemInitLock, LW_WAIT_UNTIL_FREE); */
+/*     pid = *checker_pid; */
+/*     LWLockRelease(AddinShmemInitLock); */
+
+/* 	elog(LOG,"GUC_ASSIGN_HOOK: got the pid %lu!",pid); */
+/*     if (pid > 0) { */
+/*         if (kill(pid, SIGUSR1) != 0) { */
+/*             ereport(WARNING, */
+/*                     (errmsg("failed to send SIGUSR1 to background worker with PID %d", pid), */
+/*                      errdetail("Reason: %m")));  // %m provides the error message */
+/*         } else { */
+/*             elog(LOG, "Successfully sent SIGUSR1 to background worker with PID %d", pid); */
+/*         } */
+/*     } else { */
+/*         ereport(WARNING, (errmsg("background worker PID is not set"))); */
+/*     } */
+
+/* 	/\* kill(checker_pid,SIGHUP); *\/ */
+/* } */
