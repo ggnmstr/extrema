@@ -212,7 +212,7 @@ _PG_init(void)
 									"short description",
 									"long description",
 									&cur_entry->cpu_usage,
-									0,
+									100,
 									0,
 									10000,
 									PGC_SIGHUP,
@@ -745,12 +745,15 @@ static int prepare_cgroup_subtree()
 
 void guc_checker_main(Datum main_arg)
 {
+	ListCell *lc;
+	char option_name[4096];
+
 	pqsignal(SIGTERM, SignalHandlerForShutdownRequest);
-	/* pqsignal(SIGHUP, handle_signal); */
 	pqsignal(SIGHUP, SignalHandlerForConfigReload);
-	/* pqsignal(SIGUSR1, procsignal_sigusr1_handler); */
-	pqsignal(SIGUSR1, handle_signal);
+	pqsignal(SIGUSR1, procsignal_sigusr1_handler);
 	BackgroundWorkerUnblockSignals();
+	/* pqsignal(SIGUSR1, handle_signal); */
+	/* pqsignal(SIGHUP, handle_signal); */
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
     *checker_pid = MyProcPid;
@@ -762,10 +765,13 @@ void guc_checker_main(Datum main_arg)
 	{
 		// TODO code all the important work
 		// with cgroups right here.
-		ListCell *lc;
-		char option_name[4096];
 
-		oldctx = MemoryContextSwitchTo(TopMemoryContext);
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
 		foreach(lc, library_list)
 		{
 			reg_entry *entry = (reg_entry *) lfirst(lc);
@@ -773,21 +779,19 @@ void guc_checker_main(Datum main_arg)
 			const char *option_value;
 			sprintf(option_name,"ema.%s_cpu" ,ln);
 			option_value = GetConfigOption(option_name, false, true);
-			elog(LOG, "%s : %s",option_name, option_value);
+			elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
 			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->cpu_usage);
+			set_lib_controller_value(ln,CPU_CONTROLLER, option_value, strlen(option_value));
 
 
 			sprintf(option_name,"ema.%s_mem" ,ln);
 			option_value = GetConfigOption(option_name, false, true);
-			elog(LOG, "%s : %s",option_name, option_value);
+			elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
 			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->ram_usage);
-
-
-
+			set_lib_controller_value(ln,RAM_CONTROLLER, option_value, strlen(option_value));
 		}
 		elog(LOG, "BGW I WAIT LATCH.");
-		MemoryContextSwitchTo(oldctx);
-		WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
+		(void) WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
 		ResetLatch(MyLatch);
 	}
 
@@ -899,13 +903,13 @@ ema_object_access_str(ObjectAccessType access,
 
 
 
-		if (pid > 0) {
-			if (kill(pid, SIGUSR1) != 0) {
-				elog(LOG, "ERROR SENDING SIHUP TO %lu", pid);
-			}
-		} else {
-			elog(LOG, "PID IS NOT SET :C", pid);
-		}
+		/* if (pid > 0) { */
+		/* 	if (kill(pid, SIGUSR1) != 0) { */
+		/* 		elog(LOG, "ERROR SENDING SIHUP TO %lu", pid); */
+		/* 	} */
+		/* } else { */
+		/* 	elog(LOG, "PID IS NOT SET :C", pid); */
+		/* } */
 
 	}
 }
