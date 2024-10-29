@@ -46,26 +46,23 @@ PG_MODULE_MAGIC;
 
 
 #define RAM_CONTROLLER "memory.max"
+#define SWAP_CONTROLLER "memory.swap.max"
 #define CPU_CONTROLLER "cpu.weight"
 
 typedef struct reg_entry {
 	char libname[LIBNAME_LEN];
 	int cpu_usage;
 	int ram_usage;
+	int swap_usage;
 } reg_entry;
 
-/* static void guc_assign_hook(int newval, void *extra); */
-static bool guc_check_hook(int *newval, void **extra,GucSource source);
 static bool mem_check_hook(int *newval, void **extra,GucSource source);
-
 
 static int set_lib_controller_value(const char *libname, const char *controller, const char *value, size_t vlen);
 static int healthcheck_internal();
 static void rgbgw_isolate(RegisteredBgWorker *rw);
-static int lib_create_cgroup(const char *libname, reg_entry *entry);
+static int lib_create_cgroup(const char *libname);
 static int prepare_cgroup_subtree();
-static int lib_set_mem(const char *libname, size_t val);
-static int lib_set_cpu(const char *libname, int weight);
 static reg_entry *find_entry(const char *libname);
 static int get_pm_cg();
 static void handle_signal(SIGNAL_ARGS);
@@ -195,11 +192,25 @@ _PG_init(void)
 
 			sprintf(varname,"ema.%s_mem",library_name);
 			DefineCustomIntVariable(varname,
-									"short description",
-									"long description",
+									"Extension's RAM limit in bytes",
+									NULL,
 									&cur_entry->ram_usage,
-									4096,
-									4096,
+									4096*4096,
+									0,
+									4096*4096,
+									PGC_SIGHUP,
+									0,
+									mem_check_hook,
+									NULL,
+									NULL);
+
+			sprintf(varname,"ema.%s_swap",library_name);
+			DefineCustomIntVariable(varname,
+									"Extension's VmSwap limit in bytes",
+									NULL,
+									&cur_entry->swap_usage,
+									4096*4096,
+									0,
 									4096*4096,
 									PGC_SIGHUP,
 									0,
@@ -209,8 +220,8 @@ _PG_init(void)
 
 			sprintf(varname,"ema.%s_cpu",library_name);
 			DefineCustomIntVariable(varname,
-									"short description",
-									"long description",
+									"Extension's CPU limit",
+									NULL,
 									&cur_entry->cpu_usage,
 									100,
 									0,
@@ -221,7 +232,7 @@ _PG_init(void)
 									NULL,
 									NULL);
 
-			if (lib_create_cgroup(library_name,cur_entry) != 0)
+			if (lib_create_cgroup(library_name) != 0)
 			{
 				elog(ERROR,"Error defining libs");
 			}
@@ -377,15 +388,12 @@ set_lib_controller_value(const char *libname, const char *controller, const char
 
 /*
  * Creates cgroup for given library
- * and sets some default values for it
  *
  * Returns 0 on success.
  */
 
-// FIXME "entry" is not used
-// change interaction method between user and lib
 static int
-lib_create_cgroup(const char *libname, reg_entry *entry)
+lib_create_cgroup(const char *libname)
 {
 	char cgroup_path[CGROUP_PATH_LEN];
 
@@ -398,19 +406,7 @@ lib_create_cgroup(const char *libname, reg_entry *entry)
 	}
 	elog(LOG, "CGROUP FOR %s CREATED SUCCESSFULLY",libname);
 
-	if (lib_set_mem(libname, 16384) != 0)
-	{
-		return -2;
-	}
-
-	if (lib_set_cpu(libname, 100) != 0)
-	{
-		return -3;
-	}
-
-
 	return 0;
-
 }
 
 /*
@@ -419,7 +415,8 @@ lib_create_cgroup(const char *libname, reg_entry *entry)
 * Returns pointer to that entry on success,
 * NULL otherwise.
 */
-static reg_entry *find_entry(const char *libname)
+static reg_entry*
+find_entry(const char *libname)
 {
 
 	ListCell *lc;
@@ -437,77 +434,6 @@ static reg_entry *find_entry(const char *libname)
 	return NULL;
 }
 
-PG_FUNCTION_INFO_V1(ema_lib_set_cpu);
-Datum
-ema_lib_set_cpu(PG_FUNCTION_ARGS)
-{
-	const char *libname = text_to_cstring(PG_GETARG_TEXT_P(0));
-	int weight = PG_GETARG_INT64(1);
-	lib_set_cpu(libname, weight);
-	PG_RETURN_VOID();
-}
-
-static int lib_set_cpu(const char *libname, int weight)
-{
-	char sval[CONTROLLER_VALUE_LEN];
-	int printed;
-	reg_entry *entry;
-
-	elog(LOG, "lib_set_cpu: setting %s to %lu",libname,weight);
-	printed = sprintf(sval,"%d",weight);
-	if (set_lib_controller_value(libname,CPU_CONTROLLER,sval,printed) != 0){
-		return -1;
-	}
-	return 0;
-	entry = find_entry(libname);
-	if (entry == NULL)
-	{
-		return -1;
-	}
-	entry->cpu_usage = weight;
-	return 0;
-
-}
-
-
-PG_FUNCTION_INFO_V1(ema_lib_set_mem);
-Datum
-ema_lib_set_mem(PG_FUNCTION_ARGS)
-{
-	const char *libname = text_to_cstring(PG_GETARG_TEXT_P(0));
-	int size = PG_GETARG_INT64(1);
-	lib_set_mem(libname, size);
-	PG_RETURN_VOID();
-
-}
-
-static int
-lib_set_mem(const char *libname, size_t val)
-{
-	char sval[CONTROLLER_VALUE_LEN];
-	int printed;
-	reg_entry *entry;
-
-	elog(LOG, "lib_set_mem: setting %s to %lu",libname,val);
-	printed = sprintf(sval,"%d",val);
-	if (set_lib_controller_value(libname,RAM_CONTROLLER,sval,printed) != 0){
-		return -1;
-	}
-	return 0;
-	entry = find_entry(libname);
-	if (entry == NULL)
-	{
-		return -1;
-	}
-
-	/*
-	 * memory.max in cgroup is floored to N*PAGESIZE of system.
-	 * So to keep the actual data in registry
-	 * we should also floor the number.
-	 */
-	entry->ram_usage = (val / pagesize) * (pagesize);
-	return 0;
-}
 
 
 PG_FUNCTION_INFO_V1(ema_lib_info);
@@ -604,32 +530,10 @@ ema_lib_info(PG_FUNCTION_ARGS)
 }
 
 
-
-
-/*
-** Healthcheck wrapped in SQL interface function.
-*/
-PG_FUNCTION_INFO_V1(ema_healthcheck);
-Datum
-ema_healthcheck(PG_FUNCTION_ARGS)
-{
-	int result;
-
-	result = healthcheck_internal();
-	if (result == 0){
-		PG_RETURN_TEXT_P(cstring_to_text("Everything is fine!"));
-	} else if (result == -1){
-		PG_RETURN_TEXT_P(cstring_to_text("Can't access postgres' cgroup. Assert that user has rights to edit it."));
-	} else {
-		PG_RETURN_TEXT_P(cstring_to_text("Error, are you sure that cgroup postgres exists?"));
-	}
-	PG_RETURN_TEXT_P(cstring_to_text("Everything is fine!"));
-}
-
 /*
 ** This function checks following requirements:
 ** 1. cgroup of postgres (postgres.slice) exists
-** 2. User has rights to edit it
+** 2. Owner of Postmaster process has rights to edit it
 ** 3. It has required cgroup controllers (cpuset,cpu,memory)
 **
 ** Returns 0 on success, negative value otherwise.
@@ -790,6 +694,12 @@ void guc_checker_main(Datum main_arg)
 			elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
 			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->ram_usage);
 			set_lib_controller_value(ln,RAM_CONTROLLER, option_value, strlen(option_value));
+
+			sprintf(option_name,"ema.%s_swap" ,ln);
+			option_value = GetConfigOption(option_name, false, true);
+			elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
+			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->swap_usage);
+			set_lib_controller_value(ln,SWAP_CONTROLLER, option_value, strlen(option_value));
 		}
 		elog(LOG, "BGW I WAIT LATCH.");
 		(void) WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
@@ -914,20 +824,6 @@ ema_object_access_str(ObjectAccessType access,
 
 	}
 }
-
-static bool guc_check_hook(int *newval, void **extra,GucSource source)
-{
-    pid_t pid;
-	elog(LOG,"GUC_CHECK_HOOK: START newval %d!",*newval);
-
-	if (process_shared_preload_libraries_in_progress)
-	{
-		elog(LOG,"GUC_CHECK_HOOK: IN PROGRESS OF SHARED_PRELOAD :C",pid);
-		return true;
-	}
-	return true;
-}
-
 
 static bool mem_check_hook(int *newval, void **extra,GucSource source)
 {
