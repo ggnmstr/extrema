@@ -61,7 +61,7 @@ static bool mem_check_hook(int *newval, void **extra,GucSource source);
 
 static int set_lib_controller_value(const char *libname, const char *controller, const char *value, size_t vlen);
 static int healthcheck_internal();
-static void bgw_isolate(BackgroundWorker *bgworkerEntry);
+static void rgbgw_isolate(RegisteredBgWorker *rw);
 static int lib_create_cgroup(const char *libname, reg_entry *entry);
 static int prepare_cgroup_subtree();
 static int lib_set_mem(const char *libname, size_t val);
@@ -98,7 +98,7 @@ List *library_list;
 // postmaster cgroup full path
 char pm_cg_fp[CGROUP_PATH_LEN];
 
-BgwBeforeUserCode_hook_type old_bgworker_hook;
+RegisteredBgWorker_hook_type old_regbgw_hook;
 
 MemoryContext oldctx;
 
@@ -147,8 +147,8 @@ _PG_init(void)
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = ema_shmem_request;
 
-	old_bgworker_hook = BgwBeforeUserCode_hook;
-	BgwBeforeUserCode_hook = bgw_isolate;
+	old_regbgw_hook = RegisteredBgWorker_hook;
+	RegisteredBgWorker_hook = rgbgw_isolate;
 
 	prev_object_access_hook_str = object_access_hook_str;
 	object_access_hook_str = ema_object_access_str;
@@ -326,23 +326,24 @@ static int get_pm_cg()
  * Isolates extension's bgworker by adding
  * its pid to corresponding cgroup's cgroup.procs file
  *
- * This routine is called in every bgworker
- * before executing user-defined code
- * (assigned as hook in _PG_init)
+ * This routine is executed in Postmaster's
+ * do_start_bgworker after bgworker is
+ * registered and pushed to list.
+ *
  */
 
-static void bgw_isolate(BackgroundWorker *bgw_entry)
+static void rgbgw_isolate(RegisteredBgWorker *rw)
 {
 	// max pid value is less than 32 digit
 	// allocate some more just in case
 	char spid[32];
 	int printed;
-	const char *libname = bgw_entry->bgw_library_name;
-	if (old_bgworker_hook){
-		old_bgworker_hook(bgw_entry);
+	const char *libname = rw->rw_worker.bgw_library_name;
+	if (old_regbgw_hook){
+		old_regbgw_hook(rw);
 	}
-	printed = sprintf(spid,"%lu",getpid());
-	elog(LOG,"BGW by %s, my pid: %lu",libname,getpid());
+	printed = sprintf(spid,"%lu",rw->rw_pid);
+	elog(LOG,"BGW by %s, pid: %lu",libname,rw->rw_pid);
 	printed = set_lib_controller_value(libname,"cgroup.procs",spid , printed);
 }
 
