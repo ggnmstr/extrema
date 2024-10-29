@@ -498,15 +498,17 @@ ema_lib_info(PG_FUNCTION_ARGS)
          * This should be an array of C strings which will
          * be processed later by the type input functions.
          */
-		 // lib name, cpu usage, ram usage
-        values = (char **) palloc(3 * sizeof(char *));
+		 // lib name, cpu usage, ram usage, vmswap usage
+        values = (char **) palloc(4 * sizeof(char *));
         values[0] = (char *) palloc(128 * sizeof(char));
         values[1] = (char *) palloc(16 * sizeof(char));
         values[2] = (char *) palloc(16 * sizeof(char));
+        values[3] = (char *) palloc(16 * sizeof(char));
 
         snprintf(values[0], 16, "%s", entry->libname);
         sprintf(values[1], "%d", entry->cpu_usage);
         sprintf(values[2], "%zu", entry->ram_usage);
+        sprintf(values[3], "%zu", entry->swap_usage);
 
         /* build a tuple */
         tuple = BuildTupleFromCStrings(attinmeta, values);
@@ -518,6 +520,7 @@ ema_lib_info(PG_FUNCTION_ARGS)
         pfree(values[0]);
         pfree(values[1]);
         pfree(values[2]);
+        pfree(values[3]);
         pfree(values);
 
         SRF_RETURN_NEXT(funcctx, result);
