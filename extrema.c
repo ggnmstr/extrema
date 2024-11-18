@@ -48,10 +48,12 @@ PG_MODULE_MAGIC;
 #define RAM_CONTROLLER "memory.max"
 #define SWAP_CONTROLLER "memory.swap.max"
 #define CPU_CONTROLLER "cpu.weight"
+#define CPUSET_CONTROLLER "cpuset.cpus"
 
 typedef struct reg_entry {
 	char libname[LIBNAME_LEN];
 	int cpu_usage;
+	char *listcpus;
 	int ram_usage;
 	int swap_usage;
 } reg_entry;
@@ -98,6 +100,8 @@ char pm_cg_fp[CGROUP_PATH_LEN];
 RegisteredBgWorker_hook_type old_regbgw_hook;
 
 MemoryContext oldctx;
+
+static bool cpuset_available = false;
 
 // XXX
 // https://unix.stackexchange.com/questions/754605/how-to-add-pid-inside-cgroup-procs-with-non-root-privileges-in-cgroup-v2-in-ubun
@@ -186,6 +190,7 @@ _PG_init(void)
 			oldctx = MemoryContextSwitchTo(TopMemoryContext);
 
 			cur_entry = palloc_object(reg_entry);
+			cur_entry->listcpus = palloc(256 * sizeof(char));
 			strcpy(cur_entry->libname,library_name);
 
 			library_list = lappend(library_list,cur_entry);
@@ -231,6 +236,20 @@ _PG_init(void)
 									NULL,
 									NULL,
 									NULL);
+			if (cpuset_available)
+			{
+				sprintf(varname,"ema.%s_numcpu",library_name);
+				DefineCustomStringVariable(varname,
+										"Extension's CPU cores limit",
+										NULL,
+										&cur_entry->listcpus,
+										" ",
+										PGC_SIGHUP,
+										0,
+										NULL,
+										NULL,
+										NULL);
+			}
 
 			if (lib_create_cgroup(library_name) != 0)
 			{
@@ -435,6 +454,15 @@ find_entry(const char *libname)
 }
 
 
+PG_FUNCTION_INFO_V1(ema_reload);
+Datum
+ema_reload(PG_FUNCTION_ARGS)
+{
+
+
+	PG_RETURN_VOID();
+}
+
 
 PG_FUNCTION_INFO_V1(ema_lib_info);
 Datum
@@ -586,16 +614,18 @@ static int healthcheck_internal()
 		char *controller = strtok(path," ");
 		while (controller != NULL)
 		{
-			if (strcmp(controller, "cpuset") == 0 ||
-				strcmp(controller, "cpu") == 0 ||
-				strcmp(controller,"memory") == 0)
+			if (strcmp(controller, "cpuset") == 0)
+			{
+				cpuset_available = true;
+				controllers++;
+			}
+			if (strcmp(controller, "cpu") == 0 || strcmp(controller,"memory") == 0)
 			{
 				controllers++;
 			}
 
 			controller = strtok(NULL," ");
 		}
-		// TODO IDK if we need cpuset?
 		if (controllers < 2)
 		{
 			return -5;
@@ -609,7 +639,6 @@ static int healthcheck_internal()
 
 static int prepare_cgroup_subtree()
 {
-	const char add_cpuset[] = "+cpuset\n";
 	const char add_cpu[] = "+cpu\n";
 	const char add_memory[] = "+memory\n";
 	int fd;
@@ -623,15 +652,17 @@ static int prepare_cgroup_subtree()
 		elog(ERROR,"ERROR IN OPEN: %s",strerror(e));
 		return -1;
 	}
-	// FIXME for now we blocked adding cpuset
-	// because it is not initially in our postmaster cgroup.
-	/* if (write(fd,add_cpuset,sizeof(add_cpuset)) < 0) */
-	/* { */
-	/* 	int e = errno; */
-	/* 	elog(ERROR,"ERROR IN WRITE cpuset: %s",strerror(e)); */
-	/* 	close(fd); */
-	/* 	return -2; */
-	/* } */
+	if (cpuset_available)
+	{
+		const char add_cpuset[] = "+cpuset\n";
+		if (write(fd,add_cpuset,sizeof(add_cpuset)) < 0)
+		{
+			int e = errno;
+			elog(ERROR,"ERROR IN WRITE cpuset: %s",strerror(e));
+			close(fd);
+			return -2;
+		}
+	}
 	if (write(fd,add_cpu,sizeof(add_cpu)) < 0)
 	{
 		int e = errno;
@@ -671,7 +702,7 @@ void guc_checker_main(Datum main_arg)
 
 	while(!ShutdownRequestPending)
 	{
-		// TODO code all the important work
+		// code all the important work
 		// with cgroups right here.
 
 		if (ConfigReloadPending)
@@ -703,6 +734,15 @@ void guc_checker_main(Datum main_arg)
 			elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
 			elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->swap_usage);
 			set_lib_controller_value(ln,SWAP_CONTROLLER, option_value, strlen(option_value));
+
+			if (cpuset_available)
+			{
+				sprintf(option_name,"ema.%s_numcpu" ,ln);
+				option_value = GetConfigOption(option_name, false, true);
+				elog(LOG, "\'%s\' : \'%s\'",option_name, option_value);
+				elog(LOG,"GUC_CHECKER: REGISTER VALUE: %d",entry->listcpus);
+				set_lib_controller_value(ln,CPUSET_CONTROLLER, option_value, strlen(option_value));
+			}
 		}
 		elog(LOG, "BGW I WAIT LATCH.");
 		(void) WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
@@ -712,9 +752,6 @@ void guc_checker_main(Datum main_arg)
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
     *checker_pid = 0;
     LWLockRelease(AddinShmemInitLock);
-
-    /* proc_exit(0); */
-
 }
 
 int signals = 0;
@@ -734,7 +771,6 @@ static void ema_shmem_request(void)
 
 	RequestAddinShmemSpace(sizeof(pid_t));
 	elog(LOG,"FINISH SHMEM REQUEST HOOK");
-	/* RequestAddinShmemSpace(MAXALIGN(sizeof(extensionSharedState))); */
 
 }
 

@@ -3,7 +3,7 @@
 This extension allows user to limit other extensions usage of resources (currently, only CPU, RAM and VmSwap) by adding them to corresponding cgroups. 
 These limitations can be easily configured using PostgreSQL's GUC mechanism.
 
-Currently it only supports extensions that are in *shared_preload_libraries*, the extension is also designed to be in *shared_preload_libraries*. 
+Currently it only supports extensions that are in *shared_preload_libraries*, the extension is also designed to be in *shared_preload_libraries*, also it works **ONLY** with cgroup v2. 
 
 It relies on a hook that is executed by Postmaster when it registers bgworker. 
 Currently extension ships with a patch that adds required hook.
@@ -38,6 +38,73 @@ It is not necessary to **CREATE EXTENSION**, just setting it up in *shared_prelo
 ``` sql
 CREATE EXTENSION extrema;
 ```
+
+## Running with systemd
+
+There are two main ways to run postgres with extrema on a systemd based machine:
+1. User slice 
+2. Custom not-user slice 
+
+Main difference between them is that at this moment you can't have *cpuset* controller enabled in a user-slice cgroup.
+
+### User slice
+
+This is just as you would usually run Postgres, just make sure required extensions (including extrema) are present in *shared_preload_libraries*.
+``` shell
+user@pc /Work/test> postgres -D db_test/
+```
+
+You can use systemd-run to run postgres in a created/existing cgroup and adjust some settings:
+
+``` shell
+user@pc /Work/test> systemd-run --user --scope  -p "Delegate=yes" \
+                                            -p "CPUAccounting=true" \
+                                            -p "MemoryAccounting=true" \
+                                            --slice=postgres.slice \
+                                            postgres -D db_test/
+```
+
+### Not user slice
+
+First of all, create desired slice in /sys/fs/cgroup:
+
+``` shell
+user@pc /Work/test> sudo -i
+root@pc /> cd /sys/fs/cgroup/
+root@pc /> echo "+cpu" > cgroup.subtree_control
+root@pc /> echo "+memory" > cgroup.subtree_control
+root@pc /> echo "+cpuset" > cgroup.subtree_control
+root@pc /> mkdir myslice.slice
+root@pc /> chown -R user myslice.slice/
+```
+
+Then run using systemd-run:
+
+``` shell
+user@pc /Work/test> systemd-run  --scope  -p "Delegate=yes" \
+                                          -p "CPUAccounting=true" \
+                                          -p "MemoryAccounting=true" \
+                                          -p "AllowedCPUs=4" \
+                                          --slice=myslice.slice \
+                                           postgres -D db_test/
+```
+
+PostgreSQL should launch successfully, but you still need to give permission for user to edit that slice:
+
+``` shell
+user@pc /Work/test> sudo chown -R $USER /sys/fs/cgroup/myslice.slice/
+```
+
+And then reload postgres configuration for changes to take place:
+
+``` shell
+postgres=# select pg_reload_conf();
+ pg_reload_conf
+----------------
+ t
+(1 row)
+```
+
 
 ## Usage 
 
