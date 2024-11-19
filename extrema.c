@@ -250,6 +250,10 @@ _PG_init(void)
 										NULL,
 										NULL);
 			}
+			else
+			{
+				strcpy(cur_entry->listcpus, "n/a");
+			}
 
 			if (lib_create_cgroup(library_name) != 0)
 			{
@@ -527,16 +531,18 @@ ema_lib_info(PG_FUNCTION_ARGS)
          * be processed later by the type input functions.
          */
 		 // lib name, cpu usage, ram usage, vmswap usage
-        values = (char **) palloc(4 * sizeof(char *));
+		values = (char **) palloc(5 * sizeof(char *));
         values[0] = (char *) palloc(128 * sizeof(char));
         values[1] = (char *) palloc(16 * sizeof(char));
         values[2] = (char *) palloc(16 * sizeof(char));
         values[3] = (char *) palloc(16 * sizeof(char));
+		values[4] = (char *) palloc(128 * sizeof(char));
 
         snprintf(values[0], 16, "%s", entry->libname);
         sprintf(values[1], "%d", entry->cpu_usage);
         sprintf(values[2], "%zu", entry->ram_usage);
         sprintf(values[3], "%zu", entry->swap_usage);
+		sprintf(values[4], "%s", entry->listcpus);
 
         /* build a tuple */
         tuple = BuildTupleFromCStrings(attinmeta, values);
@@ -549,6 +555,7 @@ ema_lib_info(PG_FUNCTION_ARGS)
         pfree(values[1]);
         pfree(values[2]);
         pfree(values[3]);
+		pfree(values[4]);
         pfree(values);
 
         SRF_RETURN_NEXT(funcctx, result);

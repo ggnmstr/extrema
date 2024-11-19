@@ -1,12 +1,18 @@
 # extrema - EXTension REsource MAnagement in PostgreSQL 
 
-This extension allows user to limit other extensions usage of resources (currently, only CPU, RAM and VmSwap) by adding them to corresponding cgroups. 
+This extension allows user to limit other extensions usage of resources (currently, only CPU, RAM, VmSwap and cpuset) by adding them to corresponding cgroups. 
 These limitations can be easily configured using PostgreSQL's GUC mechanism.
 
 Currently it only supports extensions that are in *shared_preload_libraries*, the extension is also designed to be in *shared_preload_libraries*, also it works **ONLY** with cgroup v2. 
 
 It relies on a hook that is executed by Postmaster when it registers bgworker. 
 Currently extension ships with a patch that adds required hook.
+
+## OOM Killer warning
+
+Extrema allows user to limit extensions' bgworkers both RAM and VmSwap usage. 
+
+However, whenever any process of PostgreSQL gets killed (including extensions' bgworkers), **ALL** other PostgreSQL processes (excluding *postmaster*) are restarted, which may lead to perfomance struggling and other problems.
 
 ## Installation
 
@@ -42,8 +48,8 @@ CREATE EXTENSION extrema;
 ## Running with systemd
 
 There are two main ways to run postgres with extrema on a systemd based machine:
-1. User slice 
-2. Custom not-user slice 
+1. **User** slice 
+2. Custom **not-user** slice 
 
 Main difference between them is that at this moment you can't have *cpuset* controller enabled in a user-slice cgroup.
 
@@ -64,7 +70,7 @@ user@pc /Work/test> systemd-run --user --scope  -p "Delegate=yes" \
                                             postgres -D db_test/
 ```
 
-### Not user slice
+### Custom slice
 
 First of all, create desired slice in /sys/fs/cgroup:
 
@@ -122,6 +128,7 @@ Extrema defines a set of GUC's for each extension in *shared_preload_libraries* 
 - ema.libname_cpu - CPU usage limit
 - ema.libname_mem - RAM usage limit in bytes
 - ema.libname_swap - VmSwap usage limit in bytes
+- ema.libname_numcpu - CPU cores assigned to extension (text, empty if no restrictions)
 
 You can easily configure them:
 
@@ -155,10 +162,10 @@ Example:
 
 ``` shell
 postgres=# select * from ema_lib_info();
- library_name | cpu_usage | ram_usage | vmswap_usage
---------------+-----------+-----------+--------------
- testl        |       100 |   9998336 |      8097792
- extrema      |       100 |  16777216 |            0
+ library_name | cpu_usage | ram_usage | vmswap_usage | numcpus
+--------------+-----------+-----------+--------------+---------
+ testl        |       100 |         0 |            0 |
+ extrema      |       100 |  16777216 |         4096 | 0-1
 (2 rows)
 ```
 
