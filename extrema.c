@@ -59,6 +59,7 @@ typedef struct reg_entry {
 } reg_entry;
 
 static bool mem_check_hook(int *newval, void **extra,GucSource source);
+static bool cpuset_check_hook(char **newval, void **extra, GucSource source);
 
 static int set_lib_controller_value(const char *libname, const char *controller, const char *value, size_t vlen);
 static int healthcheck_internal();
@@ -126,7 +127,7 @@ _PG_init(void)
 		switch (health)
 		{
 			case -1:
-				elog(ERROR,"Can't access cgroup postgres_bgworkers. Assert that user has rights to edit it.");
+				elog(ERROR,"Can't access postmaster's cgroup. Assert that user has rights to edit it.");
 				break;
 			case -5:
 				elog(ERROR,"postgres_bgworkers cgroup should have following controllers: cpu cpuset memory");
@@ -137,7 +138,7 @@ _PG_init(void)
 		}
 		return;
 	}
-	elog(LOG,"Health check passed, initializing bgworker_cgroups extension");
+	elog(LOG,"Health check passed, initializing extrema extension");
 
 	pagesize = getpagesize();
 
@@ -881,6 +882,12 @@ static bool mem_check_hook(int *newval, void **extra,GucSource source)
 	*newval = (*newval / pagesize) * (pagesize);
 	return true;
 }
+
+static bool cpuset_check_hook(char **newval, void **extra, GucSource source)
+{
+
+}
+
 /* static void guc_assign_hook(int newval, void *extra) */
 /* { */
 /*     pid_t pid; */
