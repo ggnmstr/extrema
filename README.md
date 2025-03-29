@@ -16,25 +16,32 @@ However, whenever any process of PostgreSQL gets killed (including extensions' b
 
 ## Installation
 
-1. Apply a patch to stable PostgreSQL 17:
+1. Clone repo into "contrib" directory of PostgreSQL:
 
 ``` shell
-user@pc /postgres/contrib/extrema> git checkout REL_17_STABLE
-user@pc /postgres/contrib/extrema> git apply extrema_hook_patch.diff
+user@pc /postgres/contrib> git clone https://github.com/ggnmstr/extrema.git
+```
+
+2. Apply a patch to stable PostgreSQL 17:
+
+``` shell
+user@pc /postgres/contrib/extrema> ./apply_patch.sh
 ```
 
 If patch conflitcs with branch, you can reset to specific commit that will work:
 **709ce29b16569de7ed7d013399a6249849eaae40**
 ``` shell
-user@pc /postgres/contrib/extrema> git checkout REL_17_STABLE
-user@pc /postgres/contrib/extrema> git reset --hard 709ce29b16569de7ed7d013399a6249849eaae40
-user@pc /postgres/contrib/extrema> git apply extrema_hook_patch.diff
+user@pc /postgres/contrib/extrema> cd ../
+user@pc /postgres/contrib> git checkout REL_17_STABLE
+user@pc /postgres/contrib> git reset --hard 709ce29b16569de7ed7d013399a6249849eaae40
+user@pc /postgres/contrib> cd extrema/
+user@pc /postgres/contrib/extrema> ./apply_patch.sh
 ```
 
 Don't forget to configure, make and install PostgreSQL after you apply the patch to source code.
 
+3. Install extension: 
 
-2. Install extension: 
 ``` shell 
 user@pc /postgres/contrib/extrema> make
 user@pc /postgres/contrib/extrema> make install
