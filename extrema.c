@@ -525,7 +525,8 @@ ema_lib_info(PG_FUNCTION_ARGS)
 		reg_entry *entry;
 
 
-		entry = list_nth_node(reg_entry, library_list, call_cntr);
+		/* entry = list_nth_node(reg_entry, library_list, call_cntr); */
+		entry = (reg_entry*) list_nth(library_list, call_cntr);
         /*
          * Prepare a values array for building the returned tuple.
          * This should be an array of C strings which will
@@ -753,7 +754,7 @@ void guc_checker_main(Datum main_arg)
 			}
 		}
 		elog(LOG, "BGW I WAIT LATCH.");
-		(void) WaitLatch(MyLatch, WL_LATCH_SET, -1L, PG_WAIT_ACTIVITY);
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_EXIT_ON_PM_DEATH, -1L, PG_WAIT_ACTIVITY);
 		ResetLatch(MyLatch);
 	}
 
@@ -833,7 +834,7 @@ ema_object_access_str(ObjectAccessType access,
 			return;
 		}
 
-		LWLockAcquire(AddinShmemInitLock, LW_WAIT_UNTIL_FREE);
+		LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 		pid = *checker_pid;
 		LWLockRelease(AddinShmemInitLock);
 
