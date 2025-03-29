@@ -62,12 +62,12 @@ static bool mem_check_hook(int *newval, void **extra,GucSource source);
 static bool cpuset_check_hook(char **newval, void **extra, GucSource source);
 
 static int set_lib_controller_value(const char *libname, const char *controller, const char *value, size_t vlen);
-static int healthcheck_internal();
+static int healthcheck_internal(void);
 static void rgbgw_isolate(RegisteredBgWorker *rw);
 static int lib_create_cgroup(const char *libname);
-static int prepare_cgroup_subtree();
+static int prepare_cgroup_subtree(void);
 static reg_entry *find_entry(const char *libname);
-static int get_pm_cg();
+static int get_pm_cg(void);
 static void handle_signal(SIGNAL_ARGS);
 static void ema_start_worker(void);
 static void ema_shmem_request(void);
