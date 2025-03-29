@@ -29,11 +29,11 @@ user@pc /postgres/contrib/extrema> ./apply_patch.sh
 ```
 
 If patch conflitcs with branch, you can reset to specific commit that will work:
-**709ce29b16569de7ed7d013399a6249849eaae40**
+**25303678a1d334200c0f1446eef2ebe1aaf2709b**
 ``` shell
 user@pc /postgres/contrib/extrema> cd ../
 user@pc /postgres/contrib> git checkout REL_17_STABLE
-user@pc /postgres/contrib> git reset --hard 709ce29b16569de7ed7d013399a6249849eaae40
+user@pc /postgres/contrib> git reset --hard 25303678a1d334200c0f1446eef2ebe1aaf2709b
 user@pc /postgres/contrib> cd extrema/
 user@pc /postgres/contrib/extrema> ./apply_patch.sh
 ```
