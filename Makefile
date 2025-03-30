@@ -1,4 +1,4 @@
-# contrib/bgworker_cgroups/Makefile
+# contrib/extrema/Makefile
 
 MODULE_big = extrema
 OBJS = \
